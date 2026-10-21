@@ -21,21 +21,23 @@
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <sstream>
 #include <string>
 #include <thread>
+#include <utility>
 
 namespace {
 enum class Status : unsigned { NotStarted, Loading, Running, Stopped, Failed };
 
-using KeyboardInputFn = void*(__fastcall*)(void*, void*, const std::byte*);
+using KeyboardFeedFn = bool(__fastcall*)(int, bool);
 using GetFovFn = float(__fastcall*)(void*, float, void*, void*);
 using CursorFn = void(__fastcall*)(void*);
 
 std::atomic<Status> status{Status::NotStarted};
 std::atomic<bool> stopRequested{false};
-std::atomic<KeyboardInputFn> originalKeyboardInput{nullptr};
+std::atomic<KeyboardFeedFn> originalKeyboardFeed{nullptr};
 std::atomic<GetFovFn> originalGetFov{nullptr};
 std::atomic<CursorFn> originalGrabCursor{nullptr};
 std::atomic<CursorFn> originalReleaseCursor{nullptr};
@@ -45,35 +47,36 @@ std::atomic<std::shared_ptr<const zoom::Config>> liveConfig{
 zoom::Controller controller;
 std::array<void*, 4> hookTargets{};
 bool ownsMinHook = false;
+std::mutex diagnosticMutex;
+std::ofstream diagnosticLog;
+std::atomic<bool> loggedFov{false};
 
-template <class T>
-T readAt(const std::byte* input, std::size_t offset) noexcept {
-    T value{};
-    std::memcpy(&value, input + offset, sizeof(value));
-    return value;
+template <class... Args>
+void diagnostic(Args&&... args) {
+    std::lock_guard lock(diagnosticMutex);
+    if (!diagnosticLog) return;
+    (diagnosticLog << ... << std::forward<Args>(args));
+    diagnosticLog << '\n';
+    diagnosticLog.flush();
 }
 
-void* __fastcall onKeyboardInput(void* context, void* result, const std::byte* input) {
-    if (input) {
-        // Minecraft's native key-event callback stores the key message at
-        // +0x10 and its InputKey at +0x18. This does not poll Windows state.
-        const auto message = readAt<std::uint32_t>(input, 0x10);
-        const auto inputKey = readAt<std::uint32_t>(input, 0x18);
-        const bool down = message == 0x0100u || message == 0x0104u;
-        const bool up = message == 0x0101u || message == 0x0105u;
-        if (down || up) {
-            const auto config = liveConfig.load(std::memory_order_acquire);
-            controller.onMinecraftKey(static_cast<int>(inputKey), down, *config);
-        }
-    }
-    if (auto original = originalKeyboardInput.load(std::memory_order_acquire))
-        return original(context, result, input);
-    return result;
+bool __fastcall onKeyboardFeed(int inputKey, bool down) {
+    // This is Minecraft's own KeyboardManager dispatch path. InputKey and its
+    // transition arrive as direct arguments; no Windows key-state API is used.
+    const auto config = liveConfig.load(std::memory_order_acquire);
+    controller.onMinecraftKey(inputKey, down, *config);
+    if (inputKey == config->key)
+        diagnostic("InputKey=", inputKey, " down=", down ? 1 : 0);
+    if (auto original = originalKeyboardFeed.load(std::memory_order_acquire))
+        return original(inputKey, down);
+    return false;
 }
 
 float __fastcall onGetFov(void* self, float inputFov, void* a3, void* a4) {
     auto original = originalGetFov.load(std::memory_order_acquire);
     const float fov = original ? original(self, inputFov, a3, a4) : inputFov;
+    if (!loggedFov.exchange(true, std::memory_order_acq_rel))
+        diagnostic("LevelRendererPlayer::getFov active");
     if (!cursorStateObserved.load(std::memory_order_acquire))
         controller.setGameplayActive(true);
 
@@ -89,11 +92,13 @@ void __fastcall onGrabCursor(void* self) {
     if (auto original = originalGrabCursor.load(std::memory_order_acquire)) original(self);
     cursorStateObserved.store(true, std::memory_order_release);
     controller.setGameplayActive(true);
+    diagnostic("gameplay input active");
 }
 
 void __fastcall onReleaseCursor(void* self) {
     cursorStateObserved.store(true, std::memory_order_release);
     controller.setGameplayActive(false);
+    diagnostic("gameplay input inactive");
     if (auto original = originalReleaseCursor.load(std::memory_order_acquire)) original(self);
 }
 
@@ -179,6 +184,9 @@ DWORD WINAPI startClient(void*) {
         status.store(Status::Failed, std::memory_order_release);
         return 1;
     }
+    diagnosticLog.open(path.parent_path() / L"Zoom.log",
+                       std::ios::binary | std::ios::trunc);
+    diagnostic("BedrockZoom starting");
     if (!loadConfig(path, logger)) {
         logger.error("Initial config.json is invalid or unreadable");
         status.store(Status::Failed, std::memory_order_release);
@@ -192,7 +200,7 @@ DWORD WINAPI startClient(void*) {
         status.store(Status::Failed, std::memory_order_release);
         return 1;
     }
-    const auto keyboard = resolver.resolve("GameCore::handleKeyboardInput");
+    const auto keyboard = resolver.resolve("Keyboard::feed");
     const auto fov = resolver.resolve("LevelRendererPlayer::getFov");
     const auto grab = resolver.resolve("ClientInstance::grabCursor", true);
     const auto release = resolver.resolve("ClientInstance::releaseCursor", true);
@@ -215,7 +223,7 @@ DWORD WINAPI startClient(void*) {
     }
     ownsMinHook = initialized == MH_OK;
     const bool created =
-        createHook(hookTargets[0], reinterpret_cast<void*>(&onKeyboardInput), originalKeyboardInput) &&
+        createHook(hookTargets[0], reinterpret_cast<void*>(&onKeyboardFeed), originalKeyboardFeed) &&
         createHook(hookTargets[1], reinterpret_cast<void*>(&onGetFov), originalGetFov) &&
         createHook(hookTargets[2], reinterpret_cast<void*>(&onGrabCursor), originalGrabCursor) &&
         createHook(hookTargets[3], reinterpret_cast<void*>(&onReleaseCursor), originalReleaseCursor);
@@ -233,6 +241,7 @@ DWORD WINAPI startClient(void*) {
         status.store(Status::Failed, std::memory_order_release);
         return 1;
     }
+    diagnostic("hooks enabled: Keyboard::feed, LevelRendererPlayer::getFov, cursor state");
 
     status.store(Status::Running, std::memory_order_release);
     logger.info("Minecraft native InputKey Zoom ready: ", path.string());

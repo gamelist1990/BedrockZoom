@@ -37,10 +37,12 @@ C:\Users\<ユーザー名>\Documents\PEXData\Zoom\config.json
 読めた設定を維持します。`key` は `A-Z`、`0-9`、`F1-F12`、`SPACE`、`TAB`、
 `ENTER`、`ESC`、`SHIFT`、`CTRL`、`ALT` に対応します。
 
+同じフォルダの `Zoom.log` には、フック開始、FOV呼び出し、設定キーのdown/upを記録します。
+
 ## 仕組み
 
 ```text
-Minecraft native key-event callback
+Minecraft Keyboard::feed(InputKey, down)
   -> InputKey C の押下/解放
   -> Zoom Controller（hold/toggle + 時間ベース補間）
   -> LevelRendererPlayer::getFov の戻り値を光学倍率で変換
