@@ -8,7 +8,7 @@ Minecraft Bedrock 1.26.52.3 (Windows x64) を対象にしています。
 - デフォルトは `C` を押している間だけズーム
 - フレームレート非依存のスムーズなズームアニメーション
 - `hold` / `toggle` の切り替え
-- Minecraftのネイティブキーボード入力と `LevelRendererPlayer::getFov` を直接使用
+- Minecraftのネイティブキーイベント（`InputKey`）と `LevelRendererPlayer::getFov` を直接使用
 - `GetAsyncKeyState`、キーボードフック、WndProcフックは不使用
 - `config.json` の保存を検知してゲーム中に自動反映
 - メニュー、チャット、インベントリなどカーソル解放中は入力を解除
@@ -40,7 +40,7 @@ C:\Users\<ユーザー名>\Documents\PEXData\Zoom\config.json
 ## 仕組み
 
 ```text
-Minecraft native RAWKEYBOARD handler
+Minecraft native key-event callback
   -> InputKey C の押下/解放
   -> Zoom Controller（hold/toggle + 時間ベース補間）
   -> LevelRendererPlayer::getFov の戻り値を光学倍率で変換

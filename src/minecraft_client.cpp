@@ -55,13 +55,16 @@ T readAt(const std::byte* input, std::size_t offset) noexcept {
 
 void* __fastcall onKeyboardInput(void* context, void* result, const std::byte* input) {
     if (input) {
-        // Minecraft 1.26.52.3 receives RAWKEYBOARD here. The hook consumes the
-        // engine's own packet; it does not poll Windows keyboard state.
-        const auto flags = readAt<std::uint16_t>(input, 0x1A);
-        const auto inputKey = readAt<std::uint16_t>(input, 0x1E);
-        const bool down = (flags & 0x0001u) == 0;
-        const auto config = liveConfig.load(std::memory_order_acquire);
-        controller.onMinecraftKey(static_cast<int>(inputKey), down, *config);
+        // Minecraft's native key-event callback stores the key message at
+        // +0x10 and its InputKey at +0x18. This does not poll Windows state.
+        const auto message = readAt<std::uint32_t>(input, 0x10);
+        const auto inputKey = readAt<std::uint32_t>(input, 0x18);
+        const bool down = message == 0x0100u || message == 0x0104u;
+        const bool up = message == 0x0101u || message == 0x0105u;
+        if (down || up) {
+            const auto config = liveConfig.load(std::memory_order_acquire);
+            controller.onMinecraftKey(static_cast<int>(inputKey), down, *config);
+        }
     }
     if (auto original = originalKeyboardInput.load(std::memory_order_acquire))
         return original(context, result, input);
@@ -232,7 +235,7 @@ DWORD WINAPI startClient(void*) {
     }
 
     status.store(Status::Running, std::memory_order_release);
-    logger.info("Minecraft native-input Zoom ready: ", path.string());
+    logger.info("Minecraft native InputKey Zoom ready: ", path.string());
     auto lastWrite = std::filesystem::last_write_time(path);
     while (!stopRequested.load(std::memory_order_acquire)) {
         const auto delay = liveConfig.load(std::memory_order_acquire)->reloadIntervalMs;
