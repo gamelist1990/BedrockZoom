@@ -12,6 +12,7 @@
 #include "zoom/config.hpp"
 #include "zoom/controller.hpp"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -32,20 +33,24 @@ namespace {
 enum class Status : unsigned { NotStarted, Loading, Running, Stopped, Failed };
 
 using KeyboardFeedFn = bool(__fastcall*)(int, bool);
+using MouseFeedFn = void(__fastcall*)(void*, std::int8_t, std::int8_t, std::int16_t,
+                                     std::int16_t, std::int16_t, std::int16_t, bool);
 using GetFovFn = float(__fastcall*)(void*, float, void*, void*);
 using CursorFn = void(__fastcall*)(void*);
 
 std::atomic<Status> status{Status::NotStarted};
 std::atomic<bool> stopRequested{false};
 std::atomic<KeyboardFeedFn> originalKeyboardFeed{nullptr};
+std::atomic<MouseFeedFn> originalMouseFeed{nullptr};
 std::atomic<GetFovFn> originalGetFov{nullptr};
 std::atomic<CursorFn> originalGrabCursor{nullptr};
 std::atomic<CursorFn> originalReleaseCursor{nullptr};
 std::atomic<bool> cursorStateObserved{false};
 std::atomic<std::shared_ptr<const zoom::Config>> liveConfig{
     std::make_shared<const zoom::Config>()};
+std::atomic<bool> configSavePending{false};
 zoom::Controller controller;
-std::array<void*, 4> hookTargets{};
+std::array<void*, 5> hookTargets{};
 bool ownsMinHook = false;
 std::mutex diagnosticMutex;
 std::ofstream diagnosticLog;
@@ -70,6 +75,39 @@ bool __fastcall onKeyboardFeed(int inputKey, bool down) {
     if (auto original = originalKeyboardFeed.load(std::memory_order_acquire))
         return original(inputKey, down);
     return false;
+}
+
+void __fastcall onMouseFeed(void* self, std::int8_t action, std::int8_t state,
+                            std::int16_t x, std::int16_t y, std::int16_t dx,
+                            std::int16_t dy, bool forceMotionlessPointer) {
+    // MouseDevice::feed uses action 4 for the wheel and carries the native
+    // wheel delta in state (+120/-120). Consume only an active Zoom wheel so
+    // Minecraft never advances the hotbar for an adjustment.
+    constexpr std::int8_t mouseWheel = 4;
+    auto config = liveConfig.load(std::memory_order_acquire);
+    if (action == mouseWheel && state != 0 && config->scrollAdjustment &&
+        controller.isZoomActive(*config)) {
+        for (;;) {
+            auto updated = std::make_shared<zoom::Config>(*config);
+            const float direction = state > 0 ? 1.0f : -1.0f;
+            updated->zoomMultiplier = std::clamp(
+                updated->zoomMultiplier + direction * updated->scrollStep, 1.0f, 50.0f);
+            std::shared_ptr<const zoom::Config> desired = std::move(updated);
+            if (liveConfig.compare_exchange_weak(config, desired,
+                                                  std::memory_order_acq_rel,
+                                                  std::memory_order_acquire)) {
+                configSavePending.store(true, std::memory_order_release);
+                diagnostic("Zoom wheel delta=", static_cast<int>(state),
+                           " multiplier=", desired->zoomMultiplier,
+                           " (hotbar input consumed)");
+                return;
+            }
+            if (!config->scrollAdjustment || !controller.isZoomActive(*config)) break;
+        }
+    }
+
+    if (auto original = originalMouseFeed.load(std::memory_order_acquire))
+        original(self, action, state, x, y, dx, dy, forceMotionlessPointer);
 }
 
 float __fastcall onGetFov(void* self, float inputFov, void* a3, void* a4) {
@@ -111,7 +149,8 @@ std::filesystem::path configPath() {
     return path / L"PEXData" / L"Zoom" / L"config.json";
 }
 
-bool writeDefaultConfig(const std::filesystem::path& path, std::string& error) {
+bool writeConfig(const std::filesystem::path& path, const zoom::Config& config,
+                 std::string& error) {
     std::error_code ec;
     std::filesystem::create_directories(path.parent_path(), ec);
     if (ec) {
@@ -123,8 +162,12 @@ bool writeDefaultConfig(const std::filesystem::path& path, std::string& error) {
         error = "could not create config.json";
         return false;
     }
-    output << zoom::defaultConfigJson();
+    output << zoom::configJson(config);
     return static_cast<bool>(output);
+}
+
+bool writeDefaultConfig(const std::filesystem::path& path, std::string& error) {
+    return writeConfig(path, zoom::Config{}, error);
 }
 
 bool loadConfig(const std::filesystem::path& path, bedrock::Logger& logger) {
@@ -201,17 +244,20 @@ DWORD WINAPI startClient(void*) {
         return 1;
     }
     const auto keyboard = resolver.resolve("Keyboard::feed");
+    const auto mouse = resolver.resolve("MouseDevice::feed");
     const auto fov = resolver.resolve("LevelRendererPlayer::getFov");
     const auto grab = resolver.resolve("ClientInstance::grabCursor", true);
     const auto release = resolver.resolve("ClientInstance::releaseCursor", true);
-    if (!exactRva(keyboard) || !keyboard->verified || !exactRva(fov) || !fov->verified ||
-        !exactRva(grab) || !exactRva(release)) {
+    if (!exactRva(keyboard) || !keyboard->verified ||
+        !exactRva(mouse) || !mouse->verified ||
+        !exactRva(fov) || !fov->verified || !exactRva(grab) || !exactRva(release)) {
         logger.error("Required Minecraft native input/FOV symbols are unavailable");
         status.store(Status::Failed, std::memory_order_release);
         return 1;
     }
 
     hookTargets = {reinterpret_cast<void*>(keyboard->address),
+                   reinterpret_cast<void*>(mouse->address),
                    reinterpret_cast<void*>(fov->address),
                    reinterpret_cast<void*>(grab->address),
                    reinterpret_cast<void*>(release->address)};
@@ -224,9 +270,10 @@ DWORD WINAPI startClient(void*) {
     ownsMinHook = initialized == MH_OK;
     const bool created =
         createHook(hookTargets[0], reinterpret_cast<void*>(&onKeyboardFeed), originalKeyboardFeed) &&
-        createHook(hookTargets[1], reinterpret_cast<void*>(&onGetFov), originalGetFov) &&
-        createHook(hookTargets[2], reinterpret_cast<void*>(&onGrabCursor), originalGrabCursor) &&
-        createHook(hookTargets[3], reinterpret_cast<void*>(&onReleaseCursor), originalReleaseCursor);
+        createHook(hookTargets[1], reinterpret_cast<void*>(&onMouseFeed), originalMouseFeed) &&
+        createHook(hookTargets[2], reinterpret_cast<void*>(&onGetFov), originalGetFov) &&
+        createHook(hookTargets[3], reinterpret_cast<void*>(&onGrabCursor), originalGrabCursor) &&
+        createHook(hookTargets[4], reinterpret_cast<void*>(&onReleaseCursor), originalReleaseCursor);
     if (!created) {
         removeHooks();
         logger.error("Could not create Zoom hooks");
@@ -241,7 +288,8 @@ DWORD WINAPI startClient(void*) {
         status.store(Status::Failed, std::memory_order_release);
         return 1;
     }
-    diagnostic("hooks enabled: Keyboard::feed, LevelRendererPlayer::getFov, cursor state");
+    diagnostic("hooks enabled: Keyboard::feed, MouseDevice::feed, "
+               "LevelRendererPlayer::getFov, cursor state");
 
     status.store(Status::Running, std::memory_order_release);
     logger.info("Minecraft native InputKey Zoom ready: ", path.string());
@@ -249,6 +297,19 @@ DWORD WINAPI startClient(void*) {
     while (!stopRequested.load(std::memory_order_acquire)) {
         const auto delay = liveConfig.load(std::memory_order_acquire)->reloadIntervalMs;
         std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+        if (configSavePending.exchange(false, std::memory_order_acq_rel)) {
+            const auto currentConfig = liveConfig.load(std::memory_order_acquire);
+            std::string saveError;
+            if (writeConfig(path, *currentConfig, saveError)) {
+                std::error_code writeTimeError;
+                const auto savedWrite = std::filesystem::last_write_time(path, writeTimeError);
+                if (!writeTimeError) lastWrite = savedWrite;
+                logger.info("Zoom multiplier saved: ", currentConfig->zoomMultiplier);
+            } else {
+                logger.error("Could not save Zoom multiplier: ", saveError);
+                configSavePending.store(true, std::memory_order_release);
+            }
+        }
         std::error_code ec;
         const auto current = std::filesystem::last_write_time(path, ec);
         if (!ec && current != lastWrite) {

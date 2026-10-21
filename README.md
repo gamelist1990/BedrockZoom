@@ -6,6 +6,8 @@ Minecraft Bedrock 1.26.52.3 (Windows x64) を対象にしています。
 ## 特徴
 
 - デフォルトは `C` を押している間だけズーム
+- ズーム中のホイールで倍率を調整し、そのホイール入力は消費してホットバー移動を防止
+- 調整した倍率を `config.json` に保存し、ズーム再開時・Minecraft再起動後も復元
 - フレームレート非依存のスムーズなズームアニメーション
 - `hold` / `toggle` の切り替え
 - Minecraftのネイティブキーイベント（`InputKey`）と `LevelRendererPlayer::getFov` を直接使用
@@ -27,6 +29,8 @@ C:\Users\<ユーザー名>\Documents\PEXData\Zoom\config.json
   "key": "C",
   "mode": "hold",
   "zoom_multiplier": 4.0,
+  "scroll_adjustment": true,
+  "scroll_step": 0.5,
   "smooth": true,
   "animation_speed": 12.0,
   "reload_interval_ms": 250
@@ -37,6 +41,11 @@ C:\Users\<ユーザー名>\Documents\PEXData\Zoom\config.json
 読めた設定を維持します。`key` は `A-Z`、`0-9`、`F1-F12`、`SPACE`、`TAB`、
 `ENTER`、`ESC`、`SHIFT`、`CTRL`、`ALT` に対応します。
 
+`scroll_adjustment` が有効な場合、ズームキーが有効な間だけホイール上で倍率を
+`scroll_step` 増やし、ホイール下で減らします（1.0～50.0）。変更された
+`zoom_multiplier` は自動保存されます。ズーム中に消費したホイールイベントはMinecraftへ
+渡さないため、ホットバーの選択スロットは動きません。
+
 同じフォルダの `Zoom.log` には、フック開始、FOV呼び出し、設定キーのdown/upを記録します。
 
 ## 仕組み
@@ -44,6 +53,8 @@ C:\Users\<ユーザー名>\Documents\PEXData\Zoom\config.json
 ```text
 Minecraft Keyboard::feed(InputKey, down)
   -> InputKey C の押下/解放
+Minecraft MouseDevice::feed(MouseWheel, delta)
+  -> ズーム中だけ倍率更新 + イベント消費
   -> Zoom Controller（hold/toggle + 時間ベース補間）
   -> LevelRendererPlayer::getFov の戻り値を光学倍率で変換
 ```

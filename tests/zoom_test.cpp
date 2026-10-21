@@ -9,18 +9,23 @@ int main() {
     std::string error;
     auto config = zoom::parseConfig(R"({
       "key":"Z", "mode":"hold", "zoom_multiplier":8,
+      "scroll_adjustment":true, "scroll_step":0.75,
       "smooth":false, "animation_speed":9, "reload_interval_ms":10
     })", error);
     assert(error.empty());
     assert(config.key == 'Z');
     assert(config.zoomMultiplier == 8.0f);
+    assert(config.scrollAdjustment);
+    assert(config.scrollStep == 0.75f);
     assert(config.reloadIntervalMs == 50);
 
     zoom::Controller controller;
     controller.setGameplayActive(true);
     controller.onMinecraftKey('Z', true, config);
+    assert(controller.isZoomActive(config));
     assert(controller.tick(config, 0.016f) == 8.0f);
     controller.onMinecraftKey('Z', false, config);
+    assert(!controller.isZoomActive(config));
     assert(controller.tick(config, 0.016f) == 1.0f);
 
     config.mode = zoom::ActivationMode::Toggle;
@@ -43,5 +48,10 @@ int main() {
     assert(zoom::parseKey("C") == 'C');
     assert(zoom::parseKey("f5") == 0x74);
     assert(zoom::parseKey("bad") == 'C');
+    std::string roundTripError;
+    const auto roundTrip = zoom::parseConfig(zoom::configJson(config), roundTripError);
+    assert(roundTripError.empty());
+    assert(roundTrip.zoomMultiplier == config.zoomMultiplier);
+    assert(roundTrip.scrollStep == config.scrollStep);
     std::cout << "zoom_test: PASS\n";
 }

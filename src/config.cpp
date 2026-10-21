@@ -22,6 +22,22 @@ T numberOr(const nlohmann::json& root, const char* key, T fallback) {
     if (it == root.end() || !it->is_number()) return fallback;
     return it->get<T>();
 }
+
+std::string keyName(int key) {
+    if ((key >= 'A' && key <= 'Z') || (key >= '0' && key <= '9'))
+        return std::string(1, static_cast<char>(key));
+    if (key >= 0x70 && key <= 0x7B) return "F" + std::to_string(key - 0x70 + 1);
+    switch (key) {
+    case 0x20: return "SPACE";
+    case 0x09: return "TAB";
+    case 0x0D: return "ENTER";
+    case 0x1B: return "ESC";
+    case 0x10: return "SHIFT";
+    case 0x11: return "CTRL";
+    case 0x12: return "ALT";
+    default: return "C";
+    }
+}
 } // namespace
 
 int parseKey(std::string_view name) noexcept {
@@ -59,12 +75,16 @@ Config parseConfig(std::string_view jsonText, std::string& error) noexcept {
         config.mode = mode == "TOGGLE" ? ActivationMode::Toggle : ActivationMode::Hold;
         config.zoomMultiplier = std::clamp(
             numberOr<float>(root, "zoom_multiplier", config.zoomMultiplier), 1.0f, 50.0f);
+        config.scrollAdjustment = root.value("scroll_adjustment", config.scrollAdjustment);
+        config.scrollStep = std::clamp(
+            numberOr<float>(root, "scroll_step", config.scrollStep), 0.1f, 10.0f);
         config.smooth = root.value("smooth", config.smooth);
         config.animationSpeed = std::clamp(
             numberOr<float>(root, "animation_speed", config.animationSpeed), 0.1f, 60.0f);
         config.reloadIntervalMs = std::clamp(
             numberOr<unsigned>(root, "reload_interval_ms", config.reloadIntervalMs), 50u, 5000u);
-        if (!std::isfinite(config.zoomMultiplier) || !std::isfinite(config.animationSpeed))
+        if (!std::isfinite(config.zoomMultiplier) || !std::isfinite(config.scrollStep) ||
+            !std::isfinite(config.animationSpeed))
             throw std::runtime_error("zoom values must be finite");
     } catch (const std::exception& exception) {
         error = exception.what();
@@ -72,17 +92,22 @@ Config parseConfig(std::string_view jsonText, std::string& error) noexcept {
     return config;
 }
 
-std::string defaultConfigJson() {
-    return R"({
-  "enabled": true,
-  "key": "C",
-  "mode": "hold",
-  "zoom_multiplier": 4.0,
-  "smooth": true,
-  "animation_speed": 12.0,
-  "reload_interval_ms": 250
+std::string configJson(const Config& config) {
+    nlohmann::ordered_json root;
+    root["enabled"] = config.enabled;
+    root["key"] = keyName(config.key);
+    root["mode"] = config.mode == ActivationMode::Toggle ? "toggle" : "hold";
+    root["zoom_multiplier"] = config.zoomMultiplier;
+    root["scroll_adjustment"] = config.scrollAdjustment;
+    root["scroll_step"] = config.scrollStep;
+    root["smooth"] = config.smooth;
+    root["animation_speed"] = config.animationSpeed;
+    root["reload_interval_ms"] = config.reloadIntervalMs;
+    return root.dump(2) + '\n';
 }
-)";
+
+std::string defaultConfigJson() {
+    return configJson(Config{});
 }
 
 } // namespace zoom

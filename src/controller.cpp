@@ -26,13 +26,15 @@ void Controller::resetInput() noexcept {
     toggled_.store(false, std::memory_order_release);
 }
 
-float Controller::tick(const Config& config, float deltaSeconds) noexcept {
+bool Controller::isZoomActive(const Config& config) const noexcept {
     const bool requested = config.mode == ActivationMode::Toggle
         ? toggled_.load(std::memory_order_acquire)
         : keyHeld_.load(std::memory_order_acquire);
-    const bool active = config.enabled &&
-        gameplayActive_.load(std::memory_order_acquire) && requested;
-    const float target = active ? config.zoomMultiplier : 1.0f;
+    return config.enabled && gameplayActive_.load(std::memory_order_acquire) && requested;
+}
+
+float Controller::tick(const Config& config, float deltaSeconds) noexcept {
+    const float target = isZoomActive(config) ? config.zoomMultiplier : 1.0f;
 
     if (!config.smooth) {
         currentMultiplier_ = target;

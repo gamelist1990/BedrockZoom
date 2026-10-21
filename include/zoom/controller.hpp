@@ -11,6 +11,7 @@ public:
     void onMinecraftKey(int key, bool down, const Config& config) noexcept;
     void setGameplayActive(bool active) noexcept;
     void resetInput() noexcept;
+    bool isZoomActive(const Config& config) const noexcept;
     float tick(const Config& config, float deltaSeconds) noexcept;
     float currentMultiplier() const noexcept { return currentMultiplier_; }
 
