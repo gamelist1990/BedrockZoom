@@ -230,7 +230,8 @@ DWORD WINAPI startClient(void*) {
 
     bedrock::ProfileChoice version;
     std::string profile;
-    if (!bedrock::fetchSupportedProfile(profile, version, error)) {
+    if (!bedrock::fetchSupportedProfile(profile, version, error,
+            [](std::string_view stage) { diagnostic("profile ", stage); })) {
         logger.error("Unsupported Minecraft build or profile download failed: ", error);
         diagnostic("Version profile unavailable: ", error);
         status.store(Status::Failed, std::memory_order_release);
