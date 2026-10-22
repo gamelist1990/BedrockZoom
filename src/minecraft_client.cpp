@@ -223,13 +223,16 @@ DWORD WINAPI startClient(void*) {
                        std::ios::binary | std::ios::trunc);
     diagnostic("start");
     if (!loadConfig(path, logger)) {
+        diagnostic("config load failed");
         logger.error("Initial config.json is invalid or unreadable");
         status.store(Status::Failed, std::memory_order_release);
         return 1;
     }
+    diagnostic("config ready");
 
     bedrock::ProfileChoice version;
     std::string profile;
+    diagnostic("profile inspect game");
     if (!bedrock::fetchSupportedProfile(profile, version, error,
             [](std::string_view stage) { diagnostic("profile ", stage); })) {
         logger.error("Unsupported Minecraft build or profile download failed: ", error);
@@ -237,21 +240,69 @@ DWORD WINAPI startClient(void*) {
         status.store(Status::Failed, std::memory_order_release);
         return 1;
     }
+    diagnostic("profile selected ", version.version, " ",
+               bedrock::profileSourceName(version.source));
     bedrock::Resolver resolver;
-    if (!resolver.loadJson(profile, error) ||
-        !resolver.attachWindowsMainModule(error) || !resolver.exactBuild()) {
+    diagnostic("resolver load");
+    if (!resolver.loadJson(profile, error)) {
+        diagnostic("resolver load failed: ", error);
+        logger.error("Invalid Minecraft symbol profile: ", error);
+        status.store(Status::Failed, std::memory_order_release);
+        return 1;
+    }
+    diagnostic("resolver attach");
+    if (!resolver.attachWindowsMainModule(version.identity, error)) {
+        diagnostic("resolver attach failed: ", error);
         logger.error("Unsupported Minecraft executable: ", error);
         status.store(Status::Failed, std::memory_order_release);
         return 1;
     }
-    const auto keyboard = resolver.resolve("Keyboard::feed");
-    const auto mouse = resolver.resolve("MouseDevice::feed");
-    const auto fov = resolver.resolve("LevelRendererPlayer::getFov");
-    const auto grab = resolver.resolve("ClientInstance::grabCursor", true);
-    const auto release = resolver.resolve("ClientInstance::releaseCursor", true);
-    if (!exactRva(keyboard) || !keyboard->verified ||
-        !exactRva(mouse) || !mouse->verified ||
-        !exactRva(fov) || !fov->verified || !exactRva(grab) || !exactRva(release)) {
+    if (!resolver.exactBuild()) {
+        diagnostic("resolver build mismatch");
+        logger.error("Unsupported Minecraft executable: ", error);
+        status.store(Status::Failed, std::memory_order_release);
+        return 1;
+    }
+    diagnostic("resolver ready");
+    std::optional<bedrock::Resolution> keyboard, mouse, fov, grab, release;
+    const auto resolveRequired = [&] {
+        keyboard = resolver.resolve("Keyboard::feed");
+        mouse = resolver.resolve("MouseDevice::feed");
+        fov = resolver.resolve("LevelRendererPlayer::getFov");
+        grab = resolver.resolve("ClientInstance::grabCursor", true);
+        release = resolver.resolve("ClientInstance::releaseCursor", true);
+    };
+    const auto requirementsMet = [&] {
+        return exactRva(keyboard) && keyboard->verified &&
+            exactRva(mouse) && mouse->verified && exactRva(fov) && fov->verified &&
+            exactRva(grab) && exactRva(release);
+    };
+    resolveRequired();
+    if (!requirementsMet() && version.source != bedrock::ProfileSource::Remote) {
+        diagnostic("required symbols missing in cached profile; refreshing exact-build GitHub definition");
+        std::string refreshedProfile;
+        bedrock::ProfileChoice refreshedVersion;
+        if (bedrock::refreshSupportedProfile(version.identity, refreshedProfile, refreshedVersion, error,
+                [](std::string_view stage) { diagnostic("profile ", stage); })) {
+            if (resolver.loadJson(refreshedProfile, error) &&
+                resolver.attachWindowsMainModule(refreshedVersion.identity, error) &&
+                resolver.exactBuild()) {
+                profile = std::move(refreshedProfile);
+                version = std::move(refreshedVersion);
+                resolveRequired();
+                diagnostic("latest exact-build profile loaded [",
+                           bedrock::profileSourceName(version.source), "]");
+            } else {
+                diagnostic("refreshed profile attach failed: ", error);
+            }
+        } else {
+            diagnostic("exact-build profile refresh failed: ", error);
+        }
+    }
+    if (!requirementsMet()) {
+        diagnostic("required symbols unavailable keyboard=", bool(keyboard),
+                   " mouse=", bool(mouse), " fov=", bool(fov),
+                   " grab=", bool(grab), " release=", bool(release));
         logger.error("Required Minecraft native input/FOV symbols are unavailable");
         status.store(Status::Failed, std::memory_order_release);
         return 1;
@@ -262,8 +313,10 @@ DWORD WINAPI startClient(void*) {
                    reinterpret_cast<void*>(fov->address),
                    reinterpret_cast<void*>(grab->address),
                    reinterpret_cast<void*>(release->address)};
+    diagnostic("MinHook initialize");
     const MH_STATUS initialized = MH_Initialize();
     if (initialized != MH_OK && initialized != MH_ERROR_ALREADY_INITIALIZED) {
+        diagnostic("MinHook initialize failed: ", static_cast<int>(initialized));
         logger.error("MinHook initialization failed");
         status.store(Status::Failed, std::memory_order_release);
         return 1;
@@ -276,19 +329,23 @@ DWORD WINAPI startClient(void*) {
         createHook(hookTargets[3], reinterpret_cast<void*>(&onGrabCursor), originalGrabCursor) &&
         createHook(hookTargets[4], reinterpret_cast<void*>(&onReleaseCursor), originalReleaseCursor);
     if (!created) {
+        diagnostic("Zoom hooks create failed");
         removeHooks();
         logger.error("Could not create Zoom hooks");
         status.store(Status::Failed, std::memory_order_release);
         return 1;
     }
+    diagnostic("Zoom hooks created");
     bool queued = true;
     for (void* target : hookTargets) queued = queued && MH_QueueEnableHook(target) == MH_OK;
     if (!queued || MH_ApplyQueued() != MH_OK) {
+        diagnostic("Zoom hooks enable failed");
         removeHooks();
         logger.error("Could not enable Zoom hooks");
         status.store(Status::Failed, std::memory_order_release);
         return 1;
     }
+    diagnostic("Zoom hooks enabled");
     diagnostic("ready ", version.version, " ", bedrock::profileSourceName(version.source));
 
     status.store(Status::Running, std::memory_order_release);
