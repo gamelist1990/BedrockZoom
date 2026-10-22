@@ -54,6 +54,9 @@ std::array<BDS_HookToken, 5> hookTokens{};
 std::mutex diagnosticMutex;
 std::ofstream diagnosticLog;
 std::atomic<bool> loggedFov{false};
+struct NextFrame { BDS_HookNext next{}; void* frame{}; };
+thread_local NextFrame keyboardFrame, mouseFrame, fovFrame, grabFrame, releaseFrame;
+thread_local NextFrame* cursorFrameSlot{};
 
 template <class... Args>
 void diagnostic(Args&&... args) {
@@ -208,9 +211,6 @@ bool loadConfig(const std::filesystem::path& path, bedrock::Logger& logger) {
     return true;
 }
 
-struct NextFrame { BDS_HookNext next{}; void* frame{}; };
-thread_local NextFrame keyboardFrame, mouseFrame, fovFrame, grabFrame, releaseFrame;
-thread_local NextFrame* cursorFrameSlot{};
 bool __fastcall callNextKeyboard(int key, bool down) {
     if (!keyboardFrame.next) return false;
     BDS_KeyboardArgs args{key, down ? 1 : 0, 0};

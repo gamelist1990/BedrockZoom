@@ -24,9 +24,12 @@ jobs:
       - name: Configure
         run: cmake -S . -B build -A x64 -DBUILD_TESTING=ON
       - name: Build and test
+        shell: pwsh
         run: |
           cmake --build build --config Release --parallel
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ctest --test-dir build -C Release --output-on-failure
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@v4
         with:
           name: BedrockZoom-windows-x64
