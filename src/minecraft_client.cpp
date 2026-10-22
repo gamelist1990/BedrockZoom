@@ -70,8 +70,6 @@ bool __fastcall onKeyboardFeed(int inputKey, bool down) {
     // transition arrive as direct arguments; no Windows key-state API is used.
     const auto config = liveConfig.load(std::memory_order_acquire);
     controller.onMinecraftKey(inputKey, down, *config);
-    if (inputKey == config->key)
-        diagnostic("InputKey=", inputKey, " down=", down ? 1 : 0);
     if (auto original = originalKeyboardFeed.load(std::memory_order_acquire))
         return original(inputKey, down);
     return false;
@@ -97,9 +95,6 @@ void __fastcall onMouseFeed(void* self, std::int8_t action, std::int8_t state,
                                                   std::memory_order_acq_rel,
                                                   std::memory_order_acquire)) {
                 configSavePending.store(true, std::memory_order_release);
-                diagnostic("Zoom wheel delta=", static_cast<int>(state),
-                           " multiplier=", desired->zoomMultiplier,
-                           " (hotbar input consumed)");
                 return;
             }
             if (!config->scrollAdjustment || !controller.isZoomActive(*config)) break;
@@ -130,13 +125,11 @@ void __fastcall onGrabCursor(void* self) {
     if (auto original = originalGrabCursor.load(std::memory_order_acquire)) original(self);
     cursorStateObserved.store(true, std::memory_order_release);
     controller.setGameplayActive(true);
-    diagnostic("gameplay input active");
 }
 
 void __fastcall onReleaseCursor(void* self) {
     cursorStateObserved.store(true, std::memory_order_release);
     controller.setGameplayActive(false);
-    diagnostic("gameplay input inactive");
     if (auto original = originalReleaseCursor.load(std::memory_order_acquire)) original(self);
 }
 
@@ -184,7 +177,6 @@ bool loadConfig(const std::filesystem::path& path, bedrock::Logger& logger) {
     const auto old = liveConfig.load(std::memory_order_acquire);
     if (old->key != parsed.key || old->mode != parsed.mode) controller.resetInput();
     liveConfig.store(std::make_shared<const zoom::Config>(parsed), std::memory_order_release);
-    logger.info("Zoom config applied");
     return true;
 }
 
@@ -229,7 +221,7 @@ DWORD WINAPI startClient(void*) {
     }
     diagnosticLog.open(path.parent_path() / L"Zoom.log",
                        std::ios::binary | std::ios::trunc);
-    diagnostic("BedrockZoom starting");
+    diagnostic("start");
     if (!loadConfig(path, logger)) {
         logger.error("Initial config.json is invalid or unreadable");
         status.store(Status::Failed, std::memory_order_release);
@@ -251,7 +243,6 @@ DWORD WINAPI startClient(void*) {
         status.store(Status::Failed, std::memory_order_release);
         return 1;
     }
-    diagnostic("Runtime profile active: Minecraft ", version.version);
     const auto keyboard = resolver.resolve("Keyboard::feed");
     const auto mouse = resolver.resolve("MouseDevice::feed");
     const auto fov = resolver.resolve("LevelRendererPlayer::getFov");
@@ -297,8 +288,7 @@ DWORD WINAPI startClient(void*) {
         status.store(Status::Failed, std::memory_order_release);
         return 1;
     }
-    diagnostic("hooks enabled: Keyboard::feed, MouseDevice::feed, "
-               "LevelRendererPlayer::getFov, cursor state");
+    diagnostic("ready ", version.version);
 
     status.store(Status::Running, std::memory_order_release);
     logger.info("Minecraft native InputKey Zoom ready: ", path.string());
@@ -313,7 +303,6 @@ DWORD WINAPI startClient(void*) {
                 std::error_code writeTimeError;
                 const auto savedWrite = std::filesystem::last_write_time(path, writeTimeError);
                 if (!writeTimeError) lastWrite = savedWrite;
-                logger.info("Zoom multiplier saved: ", currentConfig->zoomMultiplier);
             } else {
                 logger.error("Could not save Zoom multiplier: ", saveError);
                 configSavePending.store(true, std::memory_order_release);
