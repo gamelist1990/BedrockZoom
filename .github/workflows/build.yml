@@ -33,4 +33,6 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: BedrockZoom-windows-x64
-          path: build/Release/BedrockZoom.dll
+          path: |
+            build/Release/BedrockZoom.dll
+            build/Release/BedrockSDKRuntime.dll
