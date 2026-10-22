@@ -288,7 +288,7 @@ DWORD WINAPI startClient(void*) {
         status.store(Status::Failed, std::memory_order_release);
         return 1;
     }
-    diagnostic("ready ", version.version);
+    diagnostic("ready ", version.version, " ", bedrock::profileSourceName(version.source));
 
     status.store(Status::Running, std::memory_order_release);
     logger.info("Minecraft native InputKey Zoom ready: ", path.string());
