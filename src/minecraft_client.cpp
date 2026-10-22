@@ -313,7 +313,7 @@ DWORD WINAPI startClient(void*) {
         release = bedrock::resolveSharedHook(resolver, "ClientInstance::releaseCursor", BDS_HOOK_RELEASE_CURSOR);
     };
     const auto valid = [](const auto& value) {
-        return value && value->exact_build && value->verified;
+        return value && bedrock::isUsableSharedHookResolution(*value);
     };
     const auto requirementsMet = [&] {
         return valid(keyboard) && valid(mouse) && valid(fov) && valid(grab) && valid(release);
