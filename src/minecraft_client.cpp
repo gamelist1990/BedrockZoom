@@ -5,7 +5,7 @@
 #include <knownfolders.h>
 #include <shlobj.h>
 
-#include <MinHook.h>
+#include <bedrock/hook_runtime.h>
 #include <bedrock/logger.hpp>
 #include <bedrock/remote_catalog.hpp>
 #include <bedrock/resolver.hpp>
@@ -50,8 +50,7 @@ std::atomic<std::shared_ptr<const zoom::Config>> liveConfig{
     std::make_shared<const zoom::Config>()};
 std::atomic<bool> configSavePending{false};
 zoom::Controller controller;
-std::array<void*, 5> hookTargets{};
-bool ownsMinHook = false;
+std::array<BDS_HookToken, 5> hookTokens{};
 std::mutex diagnosticMutex;
 std::ofstream diagnosticLog;
 std::atomic<bool> loggedFov{false};
@@ -133,6 +132,35 @@ void __fastcall onReleaseCursor(void* self) {
     if (auto original = originalReleaseCursor.load(std::memory_order_acquire)) original(self);
 }
 
+void BDS_HOOK_CALL keyboardMiddleware(void*, void* raw, BDS_HookNext next, void* frame) {
+    auto* args = static_cast<BDS_KeyboardArgs*>(raw);
+    const auto previous = keyboardFrame; keyboardFrame = {next, frame};
+    args->result = onKeyboardFeed(args->key, args->down != 0) ? 1 : 0;
+    keyboardFrame = previous;
+}
+void BDS_HOOK_CALL mouseMiddleware(void*, void* raw, BDS_HookNext next, void* frame) {
+    auto* args = static_cast<BDS_MouseArgs*>(raw);
+    const auto previous = mouseFrame; mouseFrame = {next, frame};
+    onMouseFeed(args->self, args->action, args->state, args->x, args->y,
+                args->dx, args->dy, args->force_motionless_pointer != 0);
+    mouseFrame = previous;
+}
+void BDS_HOOK_CALL fovMiddleware(void*, void* raw, BDS_HookNext next, void* frame) {
+    auto* args = static_cast<BDS_FovArgs*>(raw);
+    const auto previous = fovFrame; fovFrame = {next, frame};
+    args->result = onGetFov(args->self, args->input_fov, args->a3, args->a4);
+    fovFrame = previous;
+}
+void BDS_HOOK_CALL cursorMiddleware(void* user, void* raw, BDS_HookNext next, void* frame) {
+    auto* args = static_cast<BDS_CursorArgs*>(raw);
+    const bool grabbing = reinterpret_cast<std::uintptr_t>(user) == 1;
+    auto& slot = grabbing ? grabFrame : releaseFrame;
+    const auto previous = cursorFrameSlot; cursorFrameSlot = &slot;
+    const auto old = slot; slot = {next, frame};
+    if (grabbing) onGrabCursor(args->self); else onReleaseCursor(args->self);
+    slot = old; cursorFrameSlot = previous;
+}
+
 std::filesystem::path configPath() {
     PWSTR documents = nullptr;
     if (FAILED(SHGetKnownFolderPath(FOLDERID_Documents, KF_FLAG_CREATE, nullptr, &documents)))
@@ -180,25 +208,37 @@ bool loadConfig(const std::filesystem::path& path, bedrock::Logger& logger) {
     return true;
 }
 
-bool exactRva(const std::optional<bedrock::Resolution>& symbol) {
-    return symbol && symbol->exact_build && symbol->method == "exact-rva";
+struct NextFrame { BDS_HookNext next{}; void* frame{}; };
+thread_local NextFrame keyboardFrame, mouseFrame, fovFrame, grabFrame, releaseFrame;
+thread_local NextFrame* cursorFrameSlot{};
+bool __fastcall callNextKeyboard(int key, bool down) {
+    if (!keyboardFrame.next) return false;
+    BDS_KeyboardArgs args{key, down ? 1 : 0, 0};
+    keyboardFrame.next(keyboardFrame.frame, &args);
+    return args.result != 0;
 }
-
-template <class Original>
-bool createHook(void* target, void* detour, std::atomic<Original>& original) {
-    Original captured = nullptr;
-    if (MH_CreateHook(target, detour, reinterpret_cast<void**>(&captured)) != MH_OK)
-        return false;
-    original.store(captured, std::memory_order_release);
-    return true;
+void __fastcall callNextMouse(void* self, std::int8_t action, std::int8_t state,
+    std::int16_t x, std::int16_t y, std::int16_t dx, std::int16_t dy, bool force) {
+    if (!mouseFrame.next) return;
+    BDS_MouseArgs args{self, action, state, x, y, dx, dy, force ? 1 : 0};
+    mouseFrame.next(mouseFrame.frame, &args);
+}
+float __fastcall callNextFov(void* self, float fov, void* a3, void* a4) {
+    if (!fovFrame.next) return fov;
+    BDS_FovArgs args{self, fov, a3, a4, fov};
+    fovFrame.next(fovFrame.frame, &args);
+    return args.result;
+}
+void __fastcall callNextCursor(void* self) {
+    auto* slot = cursorFrameSlot;
+    if (slot && slot->next) { BDS_CursorArgs args{self}; slot->next(slot->frame, &args); }
 }
 
 void removeHooks() noexcept {
-    for (void* target : hookTargets) if (target) MH_DisableHook(target);
-    for (void* target : hookTargets) if (target) MH_RemoveHook(target);
-    hookTargets.fill(nullptr);
-    if (ownsMinHook) MH_Uninitialize();
-    ownsMinHook = false;
+    for (auto& token : hookTokens) {
+        if (token) BDS_HookUnsubscribe(token);
+        token = nullptr;
+    }
 }
 
 DWORD WINAPI startClient(void*) {
@@ -266,16 +306,17 @@ DWORD WINAPI startClient(void*) {
     diagnostic("resolver ready");
     std::optional<bedrock::Resolution> keyboard, mouse, fov, grab, release;
     const auto resolveRequired = [&] {
-        keyboard = resolver.resolve("Keyboard::feed");
-        mouse = resolver.resolve("MouseDevice::feed");
-        fov = resolver.resolve("LevelRendererPlayer::getFov");
-        grab = resolver.resolve("ClientInstance::grabCursor", true);
-        release = resolver.resolve("ClientInstance::releaseCursor", true);
+        keyboard = bedrock::resolveSharedHook(resolver, "Keyboard::feed", BDS_HOOK_KEYBOARD_FEED);
+        mouse = bedrock::resolveSharedHook(resolver, "MouseDevice::feed", BDS_HOOK_MOUSE_FEED);
+        fov = bedrock::resolveSharedHook(resolver, "LevelRendererPlayer::getFov", BDS_HOOK_GET_FOV);
+        grab = bedrock::resolveSharedHook(resolver, "ClientInstance::grabCursor", BDS_HOOK_GRAB_CURSOR);
+        release = bedrock::resolveSharedHook(resolver, "ClientInstance::releaseCursor", BDS_HOOK_RELEASE_CURSOR);
+    };
+    const auto valid = [](const auto& value) {
+        return value && value->exact_build && value->verified;
     };
     const auto requirementsMet = [&] {
-        return exactRva(keyboard) && keyboard->verified &&
-            exactRva(mouse) && mouse->verified && exactRva(fov) && fov->verified &&
-            exactRva(grab) && exactRva(release);
+        return valid(keyboard) && valid(mouse) && valid(fov) && valid(grab) && valid(release);
     };
     resolveRequired();
     if (!requirementsMet() && version.source != bedrock::ProfileSource::Remote) {
@@ -308,44 +349,25 @@ DWORD WINAPI startClient(void*) {
         return 1;
     }
 
-    hookTargets = {reinterpret_cast<void*>(keyboard->address),
-                   reinterpret_cast<void*>(mouse->address),
-                   reinterpret_cast<void*>(fov->address),
-                   reinterpret_cast<void*>(grab->address),
-                   reinterpret_cast<void*>(release->address)};
-    diagnostic("MinHook initialize");
-    const MH_STATUS initialized = MH_Initialize();
-    if (initialized != MH_OK && initialized != MH_ERROR_ALREADY_INITIALIZED) {
-        diagnostic("MinHook initialize failed: ", static_cast<int>(initialized));
-        logger.error("MinHook initialization failed");
-        status.store(Status::Failed, std::memory_order_release);
-        return 1;
-    }
-    ownsMinHook = initialized == MH_OK;
+    originalKeyboardFeed.store(&callNextKeyboard);
+    originalMouseFeed.store(&callNextMouse);
+    originalGetFov.store(&callNextFov);
+    originalGrabCursor.store(&callNextCursor);
+    originalReleaseCursor.store(&callNextCursor);
     const bool created =
-        createHook(hookTargets[0], reinterpret_cast<void*>(&onKeyboardFeed), originalKeyboardFeed) &&
-        createHook(hookTargets[1], reinterpret_cast<void*>(&onMouseFeed), originalMouseFeed) &&
-        createHook(hookTargets[2], reinterpret_cast<void*>(&onGetFov), originalGetFov) &&
-        createHook(hookTargets[3], reinterpret_cast<void*>(&onGrabCursor), originalGrabCursor) &&
-        createHook(hookTargets[4], reinterpret_cast<void*>(&onReleaseCursor), originalReleaseCursor);
+        BDS_HookSubscribe(BDS_HOOK_KEYBOARD_FEED, reinterpret_cast<void*>(keyboard->address), keyboardMiddleware, nullptr, &hookTokens[0]) &&
+        BDS_HookSubscribe(BDS_HOOK_MOUSE_FEED, reinterpret_cast<void*>(mouse->address), mouseMiddleware, nullptr, &hookTokens[1]) &&
+        BDS_HookSubscribe(BDS_HOOK_GET_FOV, reinterpret_cast<void*>(fov->address), fovMiddleware, nullptr, &hookTokens[2]) &&
+        BDS_HookSubscribe(BDS_HOOK_GRAB_CURSOR, reinterpret_cast<void*>(grab->address), cursorMiddleware, reinterpret_cast<void*>(1), &hookTokens[3]) &&
+        BDS_HookSubscribe(BDS_HOOK_RELEASE_CURSOR, reinterpret_cast<void*>(release->address), cursorMiddleware, nullptr, &hookTokens[4]);
     if (!created) {
-        diagnostic("Zoom hooks create failed");
+        diagnostic("shared hook subscription failed");
         removeHooks();
-        logger.error("Could not create Zoom hooks");
+        logger.error("Could not subscribe Zoom to the shared Minecraft hook runtime");
         status.store(Status::Failed, std::memory_order_release);
         return 1;
     }
-    diagnostic("Zoom hooks created");
-    bool queued = true;
-    for (void* target : hookTargets) queued = queued && MH_QueueEnableHook(target) == MH_OK;
-    if (!queued || MH_ApplyQueued() != MH_OK) {
-        diagnostic("Zoom hooks enable failed");
-        removeHooks();
-        logger.error("Could not enable Zoom hooks");
-        status.store(Status::Failed, std::memory_order_release);
-        return 1;
-    }
-    diagnostic("Zoom hooks enabled");
+    diagnostic("shared hooks registered");
     diagnostic("ready ", version.version, " ", bedrock::profileSourceName(version.source));
 
     status.store(Status::Running, std::memory_order_release);

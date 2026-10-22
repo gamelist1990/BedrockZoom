@@ -22,24 +22,14 @@ target_link_libraries(zoom_core PUBLIC bedrock::symbols)
 target_compile_features(zoom_core PUBLIC cxx_std_20)
 
 if(WIN32)
-    add_library(bedrock_zoom_minhook STATIC
-        ${bedrock_sdk_SOURCE_DIR}/third_party/minhook-vendor/src/buffer.c
-        ${bedrock_sdk_SOURCE_DIR}/third_party/minhook-vendor/src/hook.c
-        ${bedrock_sdk_SOURCE_DIR}/third_party/minhook-vendor/src/trampoline.c
-        ${bedrock_sdk_SOURCE_DIR}/third_party/minhook-vendor/src/hde/hde64.c)
-    target_include_directories(bedrock_zoom_minhook PUBLIC
-        ${bedrock_sdk_SOURCE_DIR}/third_party/minhook-vendor/include)
-    target_include_directories(bedrock_zoom_minhook PRIVATE
-        ${bedrock_sdk_SOURCE_DIR}/third_party/minhook-vendor/src
-        ${bedrock_sdk_SOURCE_DIR}/third_party/minhook-vendor/src/hde)
-
     add_library(BedrockZoom SHARED src/minecraft_client.cpp)
     target_link_libraries(BedrockZoom PRIVATE zoom_core bedrock::symbols
-        bedrock::logging bedrock_zoom_minhook shell32 ole32)
+        bedrock::logging bedrock::hook_runtime shell32 ole32)
     set_target_properties(BedrockZoom PROPERTIES OUTPUT_NAME "BedrockZoom")
+    bedrock_enable_hook_runtime(BedrockZoom)
 
     if(MSVC)
-        foreach(target zoom_core bedrock_zoom_minhook BedrockZoom)
+        foreach(target zoom_core BedrockZoom)
             set_property(TARGET ${target} PROPERTY MSVC_RUNTIME_LIBRARY
                 "MultiThreaded$<$<CONFIG:Debug>:Debug>")
         endforeach()

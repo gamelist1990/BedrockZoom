@@ -1,5 +1,8 @@
 # BedrockZoom
 
+Windows配布物は `BedrockZoom.dll` 単体です。SDK hook runtimeとMinHookはDLL内に静的同封され、他のSDK製Modとはプロセス内でHook所有権を共有します。
+SDK共有ランタイムが他のBedrockDynamicSDK対応ModとMinecraft hookを共用します。
+
 [BedrockDynamicSDK](https://github.com/gamelist1990/BedrockDynamicSDK) 用の公開Zoomサンプルです。
 Minecraft Bedrock 1.26.52.3 (Windows x64) を対象にしています。
 
