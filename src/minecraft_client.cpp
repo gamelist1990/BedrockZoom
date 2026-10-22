@@ -6,8 +6,8 @@
 #include <shlobj.h>
 
 #include <MinHook.h>
-#include <bedrock/generated_symbols.hpp>
 #include <bedrock/logger.hpp>
+#include <bedrock/remote_catalog.hpp>
 #include <bedrock/resolver.hpp>
 #include "zoom/config.hpp"
 #include "zoom/controller.hpp"
@@ -236,13 +236,22 @@ DWORD WINAPI startClient(void*) {
         return 1;
     }
 
+    bedrock::ProfileChoice version;
+    std::string profile;
+    if (!bedrock::fetchSupportedProfile(profile, version, error)) {
+        logger.error("Unsupported Minecraft build or profile download failed: ", error);
+        diagnostic("Version profile unavailable: ", error);
+        status.store(Status::Failed, std::memory_order_release);
+        return 1;
+    }
     bedrock::Resolver resolver;
-    if (!resolver.loadJson(bedrock::generated::kSymbolDatabase, error) ||
+    if (!resolver.loadJson(profile, error) ||
         !resolver.attachWindowsMainModule(error) || !resolver.exactBuild()) {
         logger.error("Unsupported Minecraft executable: ", error);
         status.store(Status::Failed, std::memory_order_release);
         return 1;
     }
+    diagnostic("Runtime profile active: Minecraft ", version.version);
     const auto keyboard = resolver.resolve("Keyboard::feed");
     const auto mouse = resolver.resolve("MouseDevice::feed");
     const auto fov = resolver.resolve("LevelRendererPlayer::getFov");

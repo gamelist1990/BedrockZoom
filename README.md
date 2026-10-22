@@ -59,8 +59,10 @@ Minecraft MouseDevice::feed(MouseWheel, delta)
   -> LevelRendererPlayer::getFov の戻り値を光学倍率で変換
 ```
 
-対象EXEのハッシュがSDKプロファイルと一致した場合だけフックを有効化します。SDK依存は
-`BEDROCK_SDK_REF=main` がデフォルトなので、通常のビルドは常にSDK `main` の最新版を使用します。
+起動時にBedrockDynamicSDKのGitHub `main` からmanifestと実行中Minecraftに対応する
+バージョン別JSONを取得します。対象EXEのハッシュがそのプロファイルと一致した場合だけ
+フックを有効化するため、対応データをGitHubへ追加すれば既存DLLでも利用できます。
+SDK依存は`BEDROCK_SDK_REF=main` がデフォルトなので、通常のビルドもSDK `main` の最新版を使用します。
 再現ビルドが必要な場合だけCMake設定でコミットを明示できます。
 
 ## ビルド
