@@ -64,7 +64,7 @@ void onMouseEvent(const bedrock::MouseEvent& event) {
         controller.isZoomActive(*config)) {
         for (;;) {
             auto updated = std::make_shared<zoom::Config>(*config);
-            const float direction = state > 0 ? 1.0f : -1.0f;
+            const float direction = event.state > 0 ? 1.0f : -1.0f;
             updated->zoomMultiplier = std::clamp(
                 updated->zoomMultiplier + direction * updated->scrollStep, 1.0f, 50.0f);
             std::shared_ptr<const zoom::Config> desired = std::move(updated);
