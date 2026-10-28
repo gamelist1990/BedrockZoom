@@ -214,9 +214,31 @@ DWORD WINAPI startClient(void*) {
     gameApi.Event.Enum.Gameplay.then([](const bedrock::GameplayEvent& event) {
         controller.setGameplayActive(event.active);
     });
-    if (!gameHooks->installInput(resolver, error) ||
-        !gameHooks->installFov(resolver, error) ||
-        !gameHooks->installGameplay(resolver, error)) {
+    const auto installHooks = [&] {
+        return gameHooks->installInput(resolver, error) &&
+            gameHooks->installFov(resolver, error) &&
+            gameHooks->installGameplay(resolver, error);
+    };
+    bool hooksReady = installHooks();
+    // An exact-build cache can precede new hook definitions. Retire partial
+    // subscriptions before refreshing and retrying with the matching profile.
+    if (!hooksReady && version.source != bedrock::ProfileSource::Remote) {
+        diagnostic("cached profile lacks usable hooks; checking GitHub");
+        gameHooks.reset();
+        std::string refreshedProfile;
+        bedrock::ProfileChoice refreshedVersion;
+        if (bedrock::refreshSupportedProfile(version.identity, refreshedProfile, refreshedVersion, error,
+                [](std::string_view stage) { diagnostic("profile ", stage); }) &&
+            resolver.loadJson(refreshedProfile, error) &&
+            resolver.attachWindowsMainModule(refreshedVersion.identity, error) &&
+            resolver.exactBuild()) {
+            profile = std::move(refreshedProfile);
+            version = std::move(refreshedVersion);
+            gameHooks = std::make_unique<bedrock::GameHooks>(gameApi);
+            hooksReady = installHooks();
+        }
+    }
+    if (!hooksReady) {
         diagnostic("SDK GameHooks install failed: ", error);
         gameHooks.reset();
         logger.error("Could not subscribe Zoom to shared hook runtime");
