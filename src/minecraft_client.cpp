@@ -5,11 +5,11 @@
 #include <knownfolders.h>
 #include <shlobj.h>
 
-#include <bedrock/game_api.hpp>
-#include <bedrock/game_hooks.hpp>
-#include <bedrock/logger.hpp>
-#include <bedrock/remote_catalog.hpp>
-#include <bedrock/resolver.hpp>
+#include <bedrock/api/game_api.hpp>
+#include <bedrock/runtime/game_hooks.hpp>
+#include <bedrock/logging/logger.hpp>
+#include <bedrock/profiles/remote_catalog.hpp>
+#include <bedrock/profiles/resolver.hpp>
 #include "zoom/config.hpp"
 #include "zoom/controller.hpp"
 
